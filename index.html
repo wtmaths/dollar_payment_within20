@@ -187,6 +187,29 @@
     opacity: 0.85; transform: scale(1.15);
     border-radius: 50%; overflow: hidden;
   }
+
+/* --- 智能提示動畫 --- */
+@keyframes coinPulse {
+  0%   { transform: scale(1); box-shadow: 0 0 0 rgba(255,215,0,0); }
+  50%  { transform: scale(1.12); box-shadow: 0 0 18px rgba(255,215,0,0.95); z-index: 10; position: relative;}
+  100% { transform: scale(1); box-shadow: 0 0 0 rgba(255,215,0,0); }
+}
+
+@keyframes btnPulse {
+  0%   { transform: scale(1); box-shadow: 0 0 0 rgba(76,175,80,0); }
+  50%  { transform: scale(1.08); box-shadow: 0 0 18px rgba(76,175,80,0.95); background-color: #4CAF50; color: white; }
+  100% { transform: scale(1); box-shadow: 0 0 0 rgba(76,175,80,0); }
+}
+
+.coin-hint {
+  animation: coinPulse 1s infinite !important;
+  border-radius: 50%;
+}
+
+.btn-hint {
+  animation: btnPulse 1s infinite !important;
+}
+
 </style>
 </head>
 <body>
@@ -625,7 +648,35 @@ function checkPayment() {
     showFeedback(true, total, target);
     document.getElementById('btn-pay').style.display   = 'none';
     document.getElementById('btn-clear').style.display = 'none';
-    document.getElementById('btn-next').style.display  = 'inline-block';
+
+    let btnNext = document.getElementById('btn-next');
+    btnNext.style.display  = 'inline-block';
+
+    let countdown = 3;
+    btnNext.textContent = `▶ 下一題 (${countdown}秒)`;
+
+    if (window.autoNextTimer) clearInterval(window.autoNextTimer);
+    window.autoNextTimer = setInterval(() => {
+        countdown--;
+        if (countdown > 0) {
+            btnNext.textContent = `▶ 下一題 (${countdown}秒)`;
+        } else {
+            clearInterval(window.autoNextTimer);
+            btnNext.textContent = `▶ 下一題`;
+            if (document.getElementById('feedback').style.display !== 'none' && answered) {
+               closeFeedback();
+               nextQuestion();
+            }
+        }
+    }, 1000);
+
+    btnNext.onclick = function() {
+        if (window.autoNextTimer) clearInterval(window.autoNextTimer);
+        btnNext.textContent = `▶ 下一題`;
+        closeFeedback();
+        nextQuestion();
+        btnNext.onclick = nextQuestion;
+    };
   } else {
     wrongCount++;
     document.getElementById('wrong-count').textContent = wrongCount;
@@ -710,6 +761,169 @@ function reloadGame() {
 
 // ── Init ──
 window.onload = () => { generateQuestions(); renderCoinPool(); loadQuestion(0); };
+
+/* ===== 智能提示系統 ===== */
+let hintTimer = null;
+let autoConfirmTimer = null;
+let isLoadingQuestion = false;
+
+function getCurrentTotal() {
+  return Math.round(paidCoins.reduce((a, b) => a + b, 0) * 10) / 10;
+}
+
+function clearAllHints() {
+  if (hintTimer) {
+    clearTimeout(hintTimer);
+    hintTimer = null;
+  }
+  if (autoConfirmTimer) {
+    clearTimeout(autoConfirmTimer);
+    autoConfirmTimer = null;
+  }
+  document.querySelectorAll('#coins-pool .coin').forEach(coin => {
+    coin.classList.remove('coin-hint');
+  });
+  const btnPay = document.getElementById('btn-pay');
+  if (btnPay) btnPay.classList.remove('btn-hint');
+}
+
+function getSuggestedCoinValue(remaining) {
+  const coinVals = [10, 5, 2, 1, 0.5, 0.2, 0.1];
+  for (const v of coinVals) {
+    if (remaining >= v) return v;
+  }
+  return 0.1;
+}
+
+function flashSuggestedCoin(value) {
+  document.querySelectorAll('#coins-pool .coin').forEach(coin => {
+    coin.classList.remove('coin-hint');
+  });
+  const coins = document.querySelectorAll('#coins-pool .coin');
+  for (const coin of coins) {
+    const coinValue = parseFloat(coin.dataset.value);
+    if (Math.abs(coinValue - value) < 0.01) {
+      coin.classList.add('coin-hint');
+      break;
+    }
+  }
+}
+
+function hintConfirmButton() {
+  clearAllHints();
+  if (answered) return;
+  const q = questions[currentQ];
+  if (!q) return;
+  const total = getCurrentTotal();
+  if (total !== q.price) return;
+
+  const btnPay = document.getElementById('btn-pay');
+  if (!btnPay || btnPay.style.display === 'none') return;
+
+  btnPay.classList.add('btn-hint');
+
+  autoConfirmTimer = setTimeout(() => {
+    if (!answered && getCurrentTotal() === q.price) {
+      clearAllHints();
+      checkPayment();
+    }
+  }, 3000);
+}
+
+function repeatCoinHint(expectedTotal) {
+  if (answered) return;
+  const q = questions[currentQ];
+  if (!q) return;
+  const total = getCurrentTotal();
+  if (total !== expectedTotal) {
+    restartHintFlow();
+    return;
+  }
+  if (total === q.price) {
+    hintConfirmButton();
+    return;
+  }
+  const remaining = Math.round((q.price - total) * 10) / 10;
+  const suggestion = getSuggestedCoinValue(remaining);
+  flashSuggestedCoin(suggestion);
+
+  hintTimer = setTimeout(() => {
+    repeatCoinHint(expectedTotal);
+  }, 3000);
+}
+
+function restartHintFlow() {
+  clearAllHints();
+  if (answered) return;
+  const q = questions[currentQ];
+  if (!q) return;
+  const total = getCurrentTotal();
+  if (total === q.price) {
+    hintConfirmButton();
+    return;
+  }
+  hintTimer = setTimeout(() => {
+    repeatCoinHint(total);
+  }, 3000);
+}
+
+// 攔截原本的函數，注入提示系統邏輯
+(function installSmartHints() {
+  const _loadQuestion = loadQuestion;
+  loadQuestion = function(idx) {
+    isLoadingQuestion = true;
+    clearAllHints();
+    _loadQuestion(idx);
+    isLoadingQuestion = false;
+    restartHintFlow();
+  };
+
+  const _addCoin = addCoin;
+  addCoin = function(value) {
+    clearAllHints();
+    _addCoin(value);
+    restartHintFlow();
+  };
+
+  if (typeof removeCoin === 'function') {
+    const _removeCoin = removeCoin;
+    removeCoin = function(...args) {
+      clearAllHints();
+      _removeCoin.apply(this, args);
+      if (!isLoadingQuestion && !answered) restartHintFlow();
+    };
+  }
+
+  const _clearPayment = clearPayment;
+  clearPayment = function(...args) {
+    clearAllHints();
+    _clearPayment.apply(this, args);
+    if (!isLoadingQuestion && !answered) restartHintFlow();
+  };
+
+  const _retryQuestion = retryQuestion;
+  retryQuestion = function(...args) {
+    clearAllHints();
+    _retryQuestion.apply(this, args);
+    if (!isLoadingQuestion && !answered) restartHintFlow();
+  };
+
+  const _checkPayment = checkPayment;
+  checkPayment = function(...args) {
+    clearAllHints();
+    return _checkPayment.apply(this, args);
+  };
+})();
+
+// 新增監聽器，讓玩家手勢一碰到硬幣池就立刻隱藏閃動（提升反應速度）
+document.addEventListener('DOMContentLoaded', () => {
+    const pool = document.getElementById('coins-pool');
+    if (pool) {
+        pool.addEventListener('touchstart', clearAllHints, {passive: true});
+        pool.addEventListener('mousedown', clearAllHints, {passive: true});
+    }
+});
+
 </script>
 </body>
 </html>
